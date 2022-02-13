@@ -1,0 +1,147 @@
+---
+- hosts: 127.0.0.1
+  connection: local
+
+  vars:
+    build_dir: /tmp/plex-repack
+    clean_up: true
+    plex_version: '1.25.5.5492-12f6b8c83'
+
+  tasks:
+    - name: 'Install prerequisites: rpm-build & rpmrebuild'
+      ansible.builtin.dnf:
+        name:
+        - rpm-build
+        - rpmrebuild
+        - cpio
+        - tar
+        - binutils
+
+    - name: 'Create build directory: {{ build_dir }}'
+      ansible.builtin.file:
+        path: '{{ build_dir }}'
+        state: directory
+        mode: '0755'
+
+    - name: 'Download plexmediaserver-{{ plex_version }}.x86_64.rpm'
+      ansible.builtin.get_url:
+        url: 'https://downloads.plex.tv/plex-media-server-new/{{ plex_version }}/redhat/plexmediaserver-{{ plex_version }}.x86_64.rpm'
+        dest: '{{ build_dir }}/plexmediaserver-{{ plex_version }}.x86_64.rpm'
+
+    - name: 'Download plexmediaserver_{{ plex_version }}_arm64.deb'
+      ansible.builtin.get_url:
+        url: 'https://downloads.plex.tv/plex-media-server-new/{{ plex_version }}/debian/plexmediaserver_{{ plex_version }}_arm64.deb'
+        dest: '{{ build_dir }}/plexmediaserver_{{ plex_version }}_arm64.deb'
+
+    - name: 'Remove previous directories'
+      ansible.builtin.file:
+        path: '{{ build_dir }}/{{ item }}'
+        state: absent
+      loop:
+        - 'rpmbuild/BUILDROOT/plexmediaserver-{{ plex_version }}.aarch64'
+        - rpm
+        - deb
+
+    - name: 'Create package directories'
+      ansible.builtin.file:
+        path: '{{ build_dir }}/{{ item }}'
+        state: directory
+        mode: '0755'
+      loop:
+        - rpm
+        - deb
+
+    - name: 'Create rpmbuild directories'
+      ansible.builtin.file:
+        path: '{{ build_dir }}/rpmbuild/{{ item }}'
+        state: directory
+        mode: '0755'
+      loop:
+        - BUILD
+        - BUILDROOT
+        - RPMS
+        - SOURCES
+        - SPECS
+        - SRPMS
+
+    - name: 'Create buildroot and sub-directories'
+      ansible.builtin.file:
+        path: '{{ item }}'
+        state: directory
+        mode: '0755'
+      loop:
+        - '{{ build_dir }}/rpmbuild/BUILDROOT/plexmediaserver-{{ plex_version }}.aarch64'
+        - '{{ build_dir }}/rpmbuild/BUILDROOT/plexmediaserver-{{ plex_version }}.aarch64/usr/lib/plexmediaserver/etc'
+
+    - name: 'Unpack plexmediaserver-{{ plex_version }}.x86_64.rpm in {{ build_dir }}/rpm'
+      ansible.builtin.shell: |
+          /usr/bin/rpm2cpio plexmediaserver-{{ plex_version }}.x86_64.rpm | /usr/bin/cpio -idm -D rpm
+      args:
+        chdir: '{{ build_dir }}'
+
+    - name: 'Unpack plexmediaserver_{{ plex_version }}_arm64.deb in {{ build_dir }}/deb'
+      ansible.builtin.shell: |
+        /usr/bin/ar -x plexmediaserver_{{ plex_version }}_arm64.deb --output deb
+      args:
+        chdir: '{{ build_dir }}'
+
+    - name: 'Unpack {{ build_dir }}/deb/data.tar.xz in {{ build_dir }}/deb'
+      ansible.builtin.unarchive:
+        src: '{{ build_dir }}/deb/data.tar.xz'
+        dest: '{{ build_dir }}/deb'
+
+    - name: 'Generate a spec file from plexmediaserver-{{ plex_version }}.x86_64.rpm'
+      ansible.builtin.shell: |
+        /usr/bin/rpmrebuild -s {{ build_dir }}/plexmediaserver.spec -p {{ build_dir }}/plexmediaserver-{{ plex_version }}.x86_64.rpm
+      args:
+        chdir: '{{ build_dir }}'
+
+    - name: 'Modify rpm spec file'
+      ansible.builtin.replace:
+        path: '{{ build_dir }}/plexmediaserver.spec'
+        regexp: '{{ item.regexp }}'
+        replace: '{{ item.replace }}'
+      loop:
+        - { regexp: '^(BuildArch:)(\s*).*$', replace: '\1\2aarch64' }
+        - { regexp: '(.*)ld-musl-x86_64(.*)', replace: '\1ld-musl-aarch64\2' }
+        - { regexp: '.*plex\.repo.*', replace: '' }
+        - { regexp: '.*\/lib\/dri.*', replace: '' }
+        - { regexp: '.*libdrm\.so\.2.*', replace: '' }
+        - { regexp: '.*libdrm_intel\.so\.1.*', replace: '' }
+        - { regexp: '.*libigdgmm\.so\.plex.*', replace: '' }
+        - { regexp: '.*libpciaccess\.so\.0.*', replace: '' }
+        - { regexp: '.*libva-drm\.so\.2.*', replace: '' }
+        - { regexp: '.*libva\.so\.2.*', replace: '' }
+
+    - name: 'Copy files into buildroot'
+      ansible.builtin.synchronize:
+        src: '{{ item.src }}'
+        dest: '{{ item.dest }}'
+      loop:
+        - { src: '{{ build_dir }}/deb/usr', dest: '{{ build_dir }}/rpmbuild/BUILDROOT/plexmediaserver-{{ plex_version }}.aarch64' }
+        - { src: '{{ build_dir }}/rpm/lib', dest: '{{ build_dir }}/rpmbuild/BUILDROOT/plexmediaserver-{{ plex_version }}.aarch64' }
+        - { src: '{{ build_dir }}/rpm/etc', dest: '{{ build_dir }}/rpmbuild/BUILDROOT/plexmediaserver-{{ plex_version }}.aarch64' }
+        - { src: '{{ build_dir }}/rpm/usr/share/doc', dest: '{{ build_dir }}/rpmbuild/BUILDROOT/plexmediaserver-{{ plex_version }}.aarch64/usr/share' }
+        - { src: '{{ build_dir }}/rpm/usr/lib/plexmediaserver/etc/ld-musl-x86_64.path', dest: '{{ build_dir }}/rpmbuild/BUILDROOT/plexmediaserver-{{ plex_version }}.aarch64/usr/lib/plexmediaserver/etc/ld-musl-aarch64.path' }
+        - { src: '{{ build_dir }}/rpm/usr/lib/plexmediaserver/plexrsync.pp', dest: '{{ build_dir }}/rpmbuild/BUILDROOT/plexmediaserver-{{ plex_version }}.aarch64/usr/lib/plexmediaserver/' }
+
+    - name: 'Build rpm'
+      ansible.builtin.shell: |
+        /usr/bin/rpmbuild --define "_topdir {{ build_dir }}/rpmbuild" -bb "{{ build_dir }}/plexmediaserver.spec"
+      register: rpmbuild_result
+
+    - name: 'Copying rpm to destination'
+      ansible.builtin.copy:
+        src: '{{ build_dir }}/rpmbuild/RPMS/aarch64/plexmediaserver-{{ plex_version }}.aarch64.rpm'
+        dest: '{{ build_dir }}'
+      when: rpmbuild_result is changed
+
+    - name: 'Remove previous directories'
+      ansible.builtin.file:
+        path: '{{ build_dir }}/{{ item }}'
+        state: absent
+      loop:
+        - rpm
+        - deb
+        - rpmbuild
+      when: clean_up|bool
